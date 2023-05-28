@@ -44,26 +44,25 @@ absl::Status ProtocolDriverHoma::Initialize(
   if (!maybe_ip.ok()) return maybe_ip.status();
   server_ip_address_ = maybe_ip.value();
 
+  service_ = new CPPIncrementer;
+  server_ = bind_mrpc_server(server_ip_address_.toString());
+  add_incrementer_service(server, *service);
+  RunRegisteredThread("MrpcServer", [server]() { local_server_serve(server); });
+
   client_ = incrementer_client_connect(server_ip_address_.ToString());
-
-  server_thread_ =
-      RunRegisteredThread("MrpcServer", [=]() { this->ServerThread(); });
-
-  client_thread_ = RunRegisteredThread(
-      "MrpcClient", [=]() { this->ClientCompletionThread(); });
 
   return absl::OkStatus();
 }
 
-ProtocolDriverHoma::~ProtocolDriverHoma() {
+ProtocolDriverMRPC::~ProtocolDriverMRPC() {
   ShutdownServer();
   ShutdownClient();
 }
 
 void ProtocolDriverHoma::SetHandler(
     std::function<std::function<void()>(ServerRpcState* state)> handler) {
-  rpc_handler_ = handler;
-  handler_set_.TryToNotify();
+
+  incr.increment_impl = increment;
 }
 
 void ProtocolDriverHoma::SetNumPeers(int num_peers) {
@@ -71,36 +70,6 @@ void ProtocolDriverHoma::SetNumPeers(int num_peers) {
 }
 
 absl::Status ProtocolDriverHoma::HandleConnect(
-    std::string remote_connection_info, int peer) {
-  CHECK_GE(peer, 0);
-  CHECK_LT(static_cast<size_t>(peer), peer_addresses_.size());
-  ServerAddress addr;
-  if (!addr.ParseFromString(remote_connection_info)) {
-    return absl::UnknownError(absl::StrCat(
-        "remote_connection_info did not parse: ", remote_connection_info));
-  }
-  const char* const peer_ascii_addr = addr.ip_address().c_str();
-  auto& peer_addr = peer_addresses_[peer];
-  if (!strstr(addr.ip_address().c_str(), ":")) {
-    peer_addr.in4.sin_family = AF_INET;
-    peer_addr.in4.sin_port = htons(addr.port());
-    char* const peer_in4_addr =
-        reinterpret_cast<char*>(&peer_addr.in4.sin_addr);
-    if (!inet_pton(AF_INET, peer_ascii_addr, peer_in4_addr)) {
-      return absl::UnknownError(
-          absl::StrCat("Peer address did not parse: ", peer_ascii_addr));
-    }
-  } else {
-    peer_addr.in6.sin6_family = AF_INET6;
-    peer_addr.in6.sin6_port = htons(addr.port());
-    char* const peer_in6_addr =
-        reinterpret_cast<char*>(&peer_addr.in6.sin6_addr);
-    if (!inet_pton(AF_INET6, peer_ascii_addr, peer_in6_addr)) {
-      return absl::UnknownError(
-          absl::StrCat("Peer address did not parse: ", peer_ascii_addr));
-    }
-  }
-
   return absl::OkStatus();
 }
 
@@ -124,86 +93,16 @@ void ProtocolDriverHoma::ChurnConnection(int peer) {
 }
 
 void ProtocolDriverHoma::ShutdownServer() {
-  handler_set_.TryToNotify();
-  if (shutting_down_server_.TryToNotify()) {
-    if (server_thread_.joinable()) {
-      // Initiate RPC to our own server sock, to wake up the server_thread_:
-      char buf[1] = {};
-      uint64_t kernel_rpc_number;
-      sockaddr_in_union loopback;
-      socklen_t len = sizeof(loopback);
-      if (getsockname(homa_server_sock_, &loopback.sa, &len) < 0) {
-        LOG(ERROR) << absl::StrCat(strerror(errno),
-                                   " getting sockname from server socket");
-      }
-      if (loopback.in6.sin6_family == AF_INET6) {
-        loopback.in6.sin6_addr = in6addr_loopback;
-      } else {
-        loopback.in4.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-      }
-
-      int64_t res = homa_send(homa_server_sock_, buf, 1, &loopback,
-                              &kernel_rpc_number, 0);
-      if (res < 0) {
-        LOG(INFO) << "homa_send result: " << res << " errno: " << errno
-                  << " kernel_rpc_number " << kernel_rpc_number;
-      }
-      server_thread_.join();
-    }
-    server_receiver_.reset();
-    if (server_buffer_) {
-      munmap(server_buffer_, kHomaBufferSize);
-      server_buffer_ = nullptr;
-    }
-    close(homa_server_sock_);
-    homa_server_sock_ = -1;
-  }
+    // TODO
 }
 
-void ProtocolDriverHoma::ShutdownClient() {
-  if (shutting_down_client_.TryToNotify()) {
-    if (client_completion_thread_.joinable()) {
-      // Initiate RPC to our own client sock, then cancel it to wake up
-      // the client_completion_thread_:
-      char buf[1] = {};
-      uint64_t kernel_rpc_number;
-      sockaddr_in_union loopback;
-      socklen_t len = sizeof(loopback);
-      if (getsockname(homa_client_sock_, &loopback.sa, &len) < 0) {
-        LOG(ERROR) << absl::StrCat(strerror(errno),
-                                   " getting sockname from client socket");
-      }
-      if (loopback.in6.sin6_family == AF_INET6) {
-        loopback.in6.sin6_addr = in6addr_loopback;
-      } else {
-        loopback.in4.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-      }
-      int64_t res = homa_send(homa_client_sock_, buf, 1, &loopback,
-                              &kernel_rpc_number, 0);
-      if (res < 0) {
-        LOG(INFO) << "homa_send result: " << res << " errno: " << errno
-                  << " kernel_rpc_number " << kernel_rpc_number;
-      }
-
-      homa_abort(homa_client_sock_, kernel_rpc_number, EINTR);
-      client_completion_thread_.join();
-    }
-    while (pending_rpcs_) {
-      sched_yield();
-    }
-    client_receiver_.reset();
-    if (client_buffer_) {
-      munmap(client_buffer_, kHomaBufferSize);
-      client_buffer_ = nullptr;
-    }
-    close(homa_client_sock_);
-    homa_client_sock_ = -1;
-  }
+void ProtocolDriverMRPC::ShutdownClient() {
+    // TODO
 }
 
 void ProtocolDriverHoma::InitiateRpc(int peer_index, ClientRpcState* state,
                                      std::function<void(void)> done_callback) {
-  PendingHomaRpc* new_rpc = new PendingHomaRpc;
+  PendingMRPC* new_rpc = new PendingMRPC;
 
   new_rpc->done_callback = done_callback;
   new_rpc->state = state;
@@ -211,23 +110,29 @@ void ProtocolDriverHoma::InitiateRpc(int peer_index, ClientRpcState* state,
   state->request.AppendToString(&new_rpc->serialized_request);
   const char* const buf = new_rpc->serialized_request.data();
   const size_t buflen = new_rpc->serialized_request.size();
+
+  WValueRequest* req = new_wvaluerequest();
+  wvaluerequest_set_val(req, pending_rpcs_);
+  const char* currChar = buf;
+  for (uint32_t i = 0; i < buflen; i++) {
+    wvaluerequest_key_add_byte(req, (uint8_t) *currChar);
+    currChar++;
+  }
+
+ auto callback_fct = [this, done_callback](const RValueReply *reply) {
+    done_callback();
+    LOG(INFO) << "response: ValueReply { val: " << rvaluereply_val(reply) << " }" << std::endl;
+    delete new_rpc;
+    --pending_rpcs_;
+  };
+
+  increment(client_, req, callback_fct);
+
 #ifdef THREAD_SANITIZER
   __tsan_release(new_rpc);
 #endif
 
   ++pending_rpcs_;
-  uint64_t kernel_rpc_number;
-
-  int64_t res =
-      homa_send(homa_client_sock_, buf, buflen, &peer_addresses_[peer_index],
-                &kernel_rpc_number, reinterpret_cast<uint64_t>(new_rpc));
-  if (res < 0) {
-    LOG(INFO) << "homa_send result: " << res << " errno: " << errno
-              << " kernel_rpc_number " << kernel_rpc_number;
-    delete new_rpc;
-    state->success = false;
-    done_callback();
-  }
 }
 
 void ProtocolDriverHoma::ServerThread() {

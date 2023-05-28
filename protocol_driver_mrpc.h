@@ -66,20 +66,18 @@ class ProtocolDriverMRPC: public ProtocolDriver {
   void ClientCompletionThread();
   void ServerThread();
 
-  const size_t kHomaBufferSize = 1000 * HOMA_BPAGE_SIZE;
-  void* client_buffer_ = nullptr;
-  void* server_buffer_ = nullptr;
   std::unique_ptr<homa::receiver> client_receiver_;
   std::unique_ptr<homa::receiver> server_receiver_;
 
-  int homa_client_sock_ = -1;
-  int homa_server_sock_ = -1;
   int server_port_ = 0;
   DeviceIpAddress server_ip_address_;
   std::string my_server_socket_address_;
 
   // Homa RPC Client.
   IncrementerClient* client_;
+
+  CPPIncrementer* service_; 
+  LocalServer* server_;
 
   std::atomic<int> pending_rpcs_ = 0;
 
