@@ -24,6 +24,11 @@ bool_flag(
     build_setting_default = False,
 )
 
+bool_flag(
+    name = "with-mrpc",
+    build_setting_default = False,
+)
+
 # Declare build settings that propgate flags values to build rules:
 config_setting(
     name = "with_mercury",
@@ -38,6 +43,11 @@ config_setting(
 config_setting(
     name = "with_homa_grpc",
     flag_values = {":with-homa-grpc": "True"},
+)
+
+config_setting(
+    name = "with_mrpc",
+    flag_values = {":with-mrpc": "True"},
 )
 
 cc_library(
@@ -185,6 +195,21 @@ cc_library(
         ":with_mercury": [":protocol_driver_mercury"],
         "//conditions:default": [],
     }),
+)
+
+cc_library(
+    name = "protocol_driver_mrpc",
+    srcs = [
+        "protocol_driver_mrpc.cc",
+    ],
+    hdrs = [
+        "protocol_driver_mrpc.h",
+    ],
+    deps = [
+        ":distbench_netutils",
+        ":distbench_threadpool_lib",
+        ":protocol_driver_api",
+    ] 
 )
 
 cc_library(

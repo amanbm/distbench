@@ -27,8 +27,8 @@ namespace distbench {
 
 struct PendingMRPC {
   ClientRpcState* state;
+  GenericRequest request;
   std::string serialized_request;
-  std::string serialized_response;
   std::function<void(void)> done_callback;
 };
 
@@ -46,8 +46,7 @@ class ProtocolDriverMRPC: public ProtocolDriver {
 
   void SetNumPeers(int num_peers) override;
 
-  absl::Status HandleConnect(std::string remote_connection_info,
-                             int peer) override;
+  absl::Status HandleConnect(std::string remote_connection_info, int peer) override;
 
   absl::StatusOr<std::string> HandlePreConnect(
       std::string_view remote_connection_info, int peer) override;
@@ -67,14 +66,11 @@ class ProtocolDriverMRPC: public ProtocolDriver {
   void ClientCompletionThread();
   void ServerThread();
 
-  std::unique_ptr<homa::receiver> client_receiver_;
-  std::unique_ptr<homa::receiver> server_receiver_;
 
   int server_port_ = 0;
   DeviceIpAddress server_ip_address_;
   std::string my_server_socket_address_;
 
-  // Homa RPC Client.
   IncrementerClient* client_;
 
   LocalServer* server_;
@@ -91,7 +87,6 @@ class ProtocolDriverMRPC: public ProtocolDriver {
 
   std::function<std::function<void()>(ServerRpcState* state)> rpc_handler_;
 
-  std::vector<sockaddr_in_union> peer_addresses_;
 };
 
 }  // namespace distbench

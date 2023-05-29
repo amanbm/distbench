@@ -24,6 +24,9 @@
 #ifdef WITH_MERCURY
 #include "protocol_driver_mercury.h"
 #endif
+#ifdef WITH_MRPC
+#include "protocol_driver_mrpc.h"
+#endif
 
 namespace distbench {
 
@@ -60,6 +63,10 @@ absl::StatusOr<std::unique_ptr<ProtocolDriver>> AllocateProtocolDriver(
 #ifdef WITH_MERCURY
   } else if (opts.protocol_name() == "mercury") {
     pd = std::make_unique<ProtocolDriverMercury>();
+#endif
+#ifdef WITH_MRPC
+  } else if (opts.protocol_name() == "mrpc") {
+    pd = std::make_unique<ProtocolDriverMRPC>();
 #endif
   } else {
     if (alias_resolver_ == nullptr) {

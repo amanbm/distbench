@@ -15,6 +15,7 @@
 #include "protocol_driver_mrpc.h"
 #include "distbench_netutils.h"
 #include "distbench_utils.h"
+#include "glog/logging.h"
 
 #include <arpa/inet.h>
 #include <sys/mman.h>
@@ -26,7 +27,7 @@
 namespace distbench {
 
 ///////////////////////////////////
-// ProtocolDriverHoma Methods //
+// ProtocolDriverMRPC Methods //
 ///////////////////////////////////
 
 ProtocolDriverMRPC::ProtocolDriverMRPC() {}
@@ -46,15 +47,15 @@ absl::Status ProtocolDriverMRPC::Initialize(
   if (!maybe_ip.ok()) return maybe_ip.status();
   server_ip_address_ = maybe_ip.value();
 
-  server_ = bind_mrpc_server(server_ip_address_.toString());
-  RunRegisteredThread("MrpcServer", [server_, start_client_, handler_set_]() { 
+  server_ = bind_mrpc_server(server_ip_address_.ToString());
+  RunRegisteredThread("MrpcServer", [this]() { 
     handler_set_.WaitForNotification();
     start_client_.TryToNotify();
-    local_server_serve(server); 
+    local_server_serve(server_); 
     LOG(ERROR) << "server stopped" << std::endl;
   });
 
-  RunRegisteredThread("MrpcClient", [client_, start_client_]() { 
+  RunRegisteredThread("MrpcClient", [this]() { 
     start_client_.WaitForNotification();
 
     // let server start
@@ -112,7 +113,6 @@ void ProtocolDriverMRPC::SetHandler(
       wvalueresponse_key_add_byte(rep, (uint8_t) *currChar);
       currChar++;
     }
-
     return rep;
   };
 
@@ -123,14 +123,14 @@ void ProtocolDriverMRPC::SetHandler(
 }
 
 void ProtocolDriverMRPC::SetNumPeers(int num_peers) {
-  peer_addresses_.resize(num_peers);
+  // TODO
 }
 
-absl::Status ProtocolDriverHoma::HandleConnect() {
+absl::Status ProtocolDriverMRPC::HandleConnect(std::string remote_connection_info, int peer) {
   return absl::OkStatus();
 }
 
-absl::StatusOr<std::string> ProtocolDriverHoma::HandlePreConnect(
+absl::StatusOr<std::string> ProtocolDriverMRPC::HandlePreConnect(
     std::string_view remote_connection_info, int peer) {
   ServerAddress addr;
   addr.set_ip_address(server_ip_address_.ip());
@@ -141,15 +141,14 @@ absl::StatusOr<std::string> ProtocolDriverHoma::HandlePreConnect(
   return ret;
 }
 
-std::vector<TransportStat> ProtocolDriverHoma::GetTransportStats() {
+std::vector<TransportStat> ProtocolDriverMRPC::GetTransportStats() {
   return {};
 }
 
-void ProtocolDriverHoma::ChurnConnection(int peer) {
-  // Not required for Homa.
+void ProtocolDriverMRPC::ChurnConnection(int peer) {
 }
 
-void ProtocolDriverHoma::ShutdownServer() {
+void ProtocolDriverMRPC::ShutdownServer() {
     // TODO
 }
 
@@ -157,7 +156,7 @@ void ProtocolDriverMRPC::ShutdownClient() {
     // TODO
 }
 
-void ProtocolDriverHoma::InitiateRpc(int peer_index, ClientRpcState* state,
+void ProtocolDriverMRPC::InitiateRpc(int peer_index, ClientRpcState* state,
                                      std::function<void(void)> done_callback) {
   PendingMRPC* new_rpc = new PendingMRPC;
 
@@ -202,10 +201,6 @@ void ProtocolDriverHoma::InitiateRpc(int peer_index, ClientRpcState* state,
   };
 
   increment(client_, req, callback_fct);
-
-#ifdef THREAD_SANITIZER
-  __tsan_release(new_rpc);
-#endif
 }
 
 }  // namespace distbench

@@ -90,6 +90,12 @@ new_local_repository(
     build_file = "libfabric.BUILD",
 )
 
+new_local_repository(
+    name = "mrpc",
+    path = "external_repos/opt/mrpc",
+    build_file = "mrpc.BUILD",
+)
+
 http_archive(
     name = "grpc_homa",
     sha256 = "839f5c02a9a70b1a7422ec925b694f0a0126557208ee9240039f991f067455e3",

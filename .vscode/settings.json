@@ -58,6 +58,25 @@
         "condition_variable": "cpp",
         "map": "cpp",
         "set": "cpp",
-        "mutex": "cpp"
+        "mutex": "cpp",
+        "csetjmp": "cpp",
+        "csignal": "cpp",
+        "cstring": "cpp",
+        "any": "cpp",
+        "hash_map": "cpp",
+        "hash_set": "cpp",
+        "bitset": "cpp",
+        "cfenv": "cpp",
+        "forward_list": "cpp",
+        "list": "cpp",
+        "regex": "cpp",
+        "slist": "cpp",
+        "future": "cpp",
+        "iomanip": "cpp",
+        "scoped_allocator": "cpp",
+        "shared_mutex": "cpp",
+        "typeindex": "cpp",
+        "valarray": "cpp",
+        "variant": "cpp"
     }
 }
