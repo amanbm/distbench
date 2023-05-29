@@ -18,6 +18,8 @@
 
 #include <arpa/inet.h>
 #include <sys/mman.h>
+#include <thread>
+#include <chrono>
 
 #include "distbench_thread_support.h"
 
@@ -45,13 +47,20 @@ absl::Status ProtocolDriverMRPC::Initialize(
   server_ip_address_ = maybe_ip.value();
 
   server_ = bind_mrpc_server(server_ip_address_.toString());
-  RunRegisteredThread("MrpcServer", [server_, handler_set_]() { 
+  RunRegisteredThread("MrpcServer", [server_, start_client_, handler_set_]() { 
     handler_set_.WaitForNotification();
+    start_client_.TryToNotify();
     local_server_serve(server); 
+    LOG(ERROR) << "server stopped" << std::endl;
   });
 
+  RunRegisteredThread("MrpcClient", [client_, start_client_]() { 
+    start_client_.WaitForNotification();
 
-  client_ = incrementer_client_connect(server_ip_address_.ToString());
+    // let server start
+    std::this_thread::sleep_for (std::chrono::seconds(1));
+    client_ = incrementer_client_connect(server_ip_address_.ToString());
+  });
 
   return absl::OkStatus();
 }
@@ -67,13 +76,16 @@ void ProtocolDriverMRPC::SetHandler(
   auto service_handler = [handler](const RValueRequest *req) -> WValueReply* {
     // set up handler before local serve is called
     GenericRequest* request = new GenericRequest;
+    int msg_length = rvaluerequest_key_size(req);
     char rx_buf[1048576];
+
     // populate generic req with the req
     char* curr = rx_buf;
-    for (int i = 0; i < rvaluerequest_key_size(req); i++) {
+    for (int i = 0; i < msg_length; i++) {
         *curr = rvaluerequest_key(req, i);
+        curr++;
     }
-    if (!request->ParseFromArray(rx_buf + 1, msg_length - 1)) {
+    if (!request->ParseFromArray(rx_buf, msg_length)) {
       LOG(ERROR) << "rx_buf did not parse as a GenericRequest";
     }
     ServerRpcState* rpc_state = new ServerRpcState;
@@ -89,12 +101,19 @@ void ProtocolDriverMRPC::SetHandler(
 
     handler(rpc_state)();
 
+    std::string response;
+    rpc_state->response.SerializeToString(&response);
+    const char* const buf = response.data();
+    const size_t buflen = response.size();
 
-    // convert this into value response
-    rpc_state->response;
+    WValueReply* rep = new_wvalueresponse();
+    const char* currChar = buf;
+    for (uint32_t i = 0; i < buflen; i++) {
+      wvalueresponse_key_add_byte(rep, (uint8_t) *currChar);
+      currChar++;
+    }
 
-    // first need generic response
-    // return Val response
+    return rep;
   };
 
   CPPIncrementer incr;
@@ -142,25 +161,44 @@ void ProtocolDriverHoma::InitiateRpc(int peer_index, ClientRpcState* state,
                                      std::function<void(void)> done_callback) {
   PendingMRPC* new_rpc = new PendingMRPC;
 
+  ++pending_rpcs_;
   new_rpc->done_callback = done_callback;
   new_rpc->state = state;
-  new_rpc->serialized_request = "?";  // Homa can't send a 0 byte message :(
-  state->request.AppendToString(&new_rpc->serialized_request);
+  new_rpc->request = std::move(state->request);
+  new_rpc->serialized_request = "?"; 
+  state->request.SerializeToString(&new_rpc->serialized_request);
   const char* const buf = new_rpc->serialized_request.data();
   const size_t buflen = new_rpc->serialized_request.size();
 
   WValueRequest* req = new_wvaluerequest();
-  wvaluerequest_set_val(req, pending_rpcs_);
   const char* currChar = buf;
   for (uint32_t i = 0; i < buflen; i++) {
     wvaluerequest_key_add_byte(req, (uint8_t) *currChar);
     currChar++;
   }
 
- auto callback_fct = [new_rpc, done_callback](const RValueReply *reply) {
-    done_callback();
-    LOG(INFO) << "response: ValueReply { val: " << rvaluereply_val(reply) << " }" << std::endl;
-    delete new_rpc;
+  auto callback_fct = [new_rpc, done_callback](const RValueReply *reply) {
+      int msg_length = rvalueresponse_key_size(reply);
+      // get rx buf
+      char rx_buf[1048576];
+      // populate generic req with the req
+      char* curr = rx_buf;
+      for (int i = 0; i < msg_length; i++) {
+          *curr = (char) rvalueresponse_key(req, i);
+          curr++;
+      }
+
+      bool success = new_rpc->response.ParseFromArray(rx_buf, msg_length);
+      if (!success) {
+        LOG(ERROR) << "rx_buf did not parse as a GenericResponse";
+      } else {
+        new_rpc->state->request = std::move(new_rpc->request);
+        new_rpc->state->response = std::move(new_rpc->response);
+      }
+      new_rpc->state->success = success;
+      --pending_rpcs_;
+      done_callback();
+      delete new_rpc;
   };
 
   increment(client_, req, callback_fct);

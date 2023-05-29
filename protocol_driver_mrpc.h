@@ -28,6 +28,7 @@ namespace distbench {
 struct PendingMRPC {
   ClientRpcState* state;
   std::string serialized_request;
+  std::string serialized_response;
   std::function<void(void)> done_callback;
 };
 
@@ -84,6 +85,7 @@ class ProtocolDriverMRPC: public ProtocolDriver {
   std::thread client_completion_thread_;
   std::thread server_thread_;
   SafeNotification handler_set_;
+  SafeNotification start_client_;
   SafeNotification shutting_down_server_;
   SafeNotification shutting_down_client_;
 
