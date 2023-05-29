@@ -76,7 +76,6 @@ class ProtocolDriverMRPC: public ProtocolDriver {
   // Homa RPC Client.
   IncrementerClient* client_;
 
-  CPPIncrementer* service_; 
   LocalServer* server_;
 
   std::atomic<int> pending_rpcs_ = 0;

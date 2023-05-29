@@ -27,9 +27,9 @@ namespace distbench {
 // ProtocolDriverHoma Methods //
 ///////////////////////////////////
 
-ProtocolDriverHoma::ProtocolDriverHoma() {}
+ProtocolDriverMRPC::ProtocolDriverMRPC() {}
 
-absl::Status ProtocolDriverHoma::Initialize(
+absl::Status ProtocolDriverMRPC::Initialize(
     const ProtocolDriverOptions& pd_opts, int* port) {
   if (pd_opts.has_netdev_name()) {
     netdev_name_ = pd_opts.netdev_name();
@@ -44,10 +44,12 @@ absl::Status ProtocolDriverHoma::Initialize(
   if (!maybe_ip.ok()) return maybe_ip.status();
   server_ip_address_ = maybe_ip.value();
 
-  service_ = new CPPIncrementer;
   server_ = bind_mrpc_server(server_ip_address_.toString());
-  add_incrementer_service(server, *service);
-  RunRegisteredThread("MrpcServer", [server]() { local_server_serve(server); });
+  RunRegisteredThread("MrpcServer", [server_, handler_set_]() { 
+    handler_set_.WaitForNotification();
+    local_server_serve(server); 
+  });
+
 
   client_ = incrementer_client_connect(server_ip_address_.ToString());
 
@@ -59,17 +61,53 @@ ProtocolDriverMRPC::~ProtocolDriverMRPC() {
   ShutdownClient();
 }
 
-void ProtocolDriverHoma::SetHandler(
-    std::function<std::function<void()>(ServerRpcState* state)> handler) {
+void ProtocolDriverMRPC::SetHandler(
+  std::function<std::function<void()>(ServerRpcState* state)> handler) {
 
-  incr.increment_impl = increment;
+  auto service_handler = [handler](const RValueRequest *req) -> WValueReply* {
+    // set up handler before local serve is called
+    GenericRequest* request = new GenericRequest;
+    char rx_buf[1048576];
+    // populate generic req with the req
+    char* curr = rx_buf;
+    for (int i = 0; i < rvaluerequest_key_size(req); i++) {
+        *curr = rvaluerequest_key(req, i);
+    }
+    if (!request->ParseFromArray(rx_buf + 1, msg_length - 1)) {
+      LOG(ERROR) << "rx_buf did not parse as a GenericRequest";
+    }
+    ServerRpcState* rpc_state = new ServerRpcState;
+    rpc_state->request = request;
+    rpc_state->SetFreeStateFunction([=]() {
+      delete rpc_state->request;
+      delete rpc_state;
+    });
+
+    rpc_state->SetSendResponseFunction([]() {
+        LOG(INFO) << "send resp func called" << std::endl;
+    });
+
+    handler(rpc_state)();
+
+
+    // convert this into value response
+    rpc_state->response;
+
+    // first need generic response
+    // return Val response
+  };
+
+  CPPIncrementer incr;
+  incr.increment_impl = service_handler;
+  add_incrementer_service(server, incr);
+  handler_set_.TryToNotify();
 }
 
-void ProtocolDriverHoma::SetNumPeers(int num_peers) {
+void ProtocolDriverMRPC::SetNumPeers(int num_peers) {
   peer_addresses_.resize(num_peers);
 }
 
-absl::Status ProtocolDriverHoma::HandleConnect(
+absl::Status ProtocolDriverHoma::HandleConnect() {
   return absl::OkStatus();
 }
 
@@ -119,11 +157,10 @@ void ProtocolDriverHoma::InitiateRpc(int peer_index, ClientRpcState* state,
     currChar++;
   }
 
- auto callback_fct = [this, done_callback](const RValueReply *reply) {
+ auto callback_fct = [new_rpc, done_callback](const RValueReply *reply) {
     done_callback();
     LOG(INFO) << "response: ValueReply { val: " << rvaluereply_val(reply) << " }" << std::endl;
     delete new_rpc;
-    --pending_rpcs_;
   };
 
   increment(client_, req, callback_fct);
@@ -131,103 +168,6 @@ void ProtocolDriverHoma::InitiateRpc(int peer_index, ClientRpcState* state,
 #ifdef THREAD_SANITIZER
   __tsan_release(new_rpc);
 #endif
-
-  ++pending_rpcs_;
-}
-
-void ProtocolDriverHoma::ServerThread() {
-  std::atomic<int> pending_actionlist_threads = 0;
-
-  handler_set_.WaitForNotification();
-  while (1) {
-    errno = 0;
-    ssize_t msg_length = server_receiver_->receive(HOMA_RECVMSG_REQUEST, 0);
-    if (shutting_down_server_.HasBeenNotified()) {
-      break;
-    }
-    int recv_errno = errno;
-    if (msg_length < 0) {
-      if (recv_errno != EINTR && recv_errno != EAGAIN) {
-        LOG(ERROR) << "server homa_recv had an error: " << strerror(recv_errno);
-      }
-      continue;
-    }
-    if (msg_length == 0) {
-      LOG(ERROR) << "server homa_recv got zero length request.";
-      continue;
-    }
-    CHECK(server_receiver_->is_request());
-    const sockaddr_in_union src_addr = *server_receiver_->src_addr();
-    const uint64_t rpc_id = server_receiver_->id();
-
-    GenericRequest* request = new GenericRequest;
-    char rx_buf[1048576];
-    server_receiver_->copy_out((void*)rx_buf, 0, sizeof(rx_buf));
-    if (!request->ParseFromArray(rx_buf + 1, msg_length - 1)) {
-      LOG(ERROR) << "rx_buf did not parse as a GenericRequest";
-    }
-    ServerRpcState* rpc_state = new ServerRpcState;
-    rpc_state->request = request;
-    rpc_state->SetFreeStateFunction([=]() {
-      delete rpc_state->request;
-      delete rpc_state;
-    });
-    rpc_state->SetSendResponseFunction([=, &pending_actionlist_threads]() {
-      std::string txbuf = "!";  // Homa can't send a 0 byte message :(
-      rpc_state->response.AppendToString(&txbuf);
-      int64_t error = homa_reply(homa_server_sock_, txbuf.c_str(),
-                                 txbuf.length(), &src_addr, rpc_id);
-      if (error) {
-        LOG(ERROR) << "homa_reply for " << rpc_id
-                   << " returned error: " << strerror(errno);
-      }
-      --pending_actionlist_threads;
-    });
-    auto fct_action_list_thread = rpc_handler_(rpc_state);
-    ++pending_actionlist_threads;
-    if (fct_action_list_thread)
-      RunRegisteredThread("DedicatedActionListThread", fct_action_list_thread)
-          .detach();
-  }
-  while (pending_actionlist_threads) {
-    sched_yield();
-  }
-}
-
-void ProtocolDriverHoma::ClientCompletionThread() {
-  while (!shutting_down_client_.HasBeenNotified() || pending_rpcs_) {
-    errno = 0;
-    ssize_t msg_length = client_receiver_->receive(HOMA_RECVMSG_RESPONSE, 0);
-    int recv_errno = errno;
-    if (msg_length < 0) {
-      if (recv_errno != EINTR && recv_errno != EAGAIN) {
-        LOG(ERROR) << "homa_recv had an error: " << strerror(recv_errno);
-      }
-      continue;
-    }
-
-    PendingHomaRpc* pending_rpc = reinterpret_cast<PendingHomaRpc*>(
-        client_receiver_->completion_cookie());
-#ifdef THREAD_SANITIZER
-    __tsan_acquire(pending_rpc);
-#endif
-    CHECK(pending_rpc) << "Completion cookie was NULL";
-    if (recv_errno || !msg_length) {
-      pending_rpc->state->success = false;
-    } else {
-      pending_rpc->state->success = true;
-      char rx_buf[1048576];
-      CHECK(!client_receiver_->is_request());
-      client_receiver_->copy_out((void*)rx_buf, 0, sizeof(rx_buf));
-      if (!pending_rpc->state->response.ParseFromArray(rx_buf + 1,
-                                                       msg_length - 1)) {
-        LOG(ERROR) << "rx_buf did not parse as a GenericResponse";
-      }
-    }
-    pending_rpc->done_callback();
-    --pending_rpcs_;
-    delete pending_rpc;
-  }
 }
 
 }  // namespace distbench
