@@ -206,6 +206,7 @@ cc_library(
         "protocol_driver_mrpc.h",
     ],
     deps = [
+        "//:mrpc",
         ":distbench_netutils",
         ":distbench_threadpool_lib",
         ":protocol_driver_api",
